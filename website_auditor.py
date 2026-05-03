@@ -6,13 +6,21 @@ import time
 import re
 import argparse
 import logging
+import google.generativeai as genai
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class WebsiteAuditor:
-    def __init__(self, start_url, max_pages=100):
+    def __init__(self, start_url, max_pages=100, gemini_api_key=None):
+        self.gemini_api_key = gemini_api_key
+        if self.gemini_api_key:
+            genai.configure(api_key=self.gemini_api_key)
+            self.model = genai.GenerativeModel('gemini-2.5-flash')
+        else:
+            self.model = None
+
         self.start_url = start_url
         if not self.start_url.startswith('http'):
             self.start_url = 'https://' + self.start_url
@@ -93,16 +101,34 @@ class WebsiteAuditor:
             self.page_audit_data.append(page_info)
             return
 
+        # Advanced Checking
+        page_info['Title Status'] = 'Missing'
+        page_info['Meta Desc Status'] = 'Missing'
+        page_info['Keywords'] = 'N/A'
+        page_info['AI Recommendations'] = 'N/A'
+
         # Extract SEO elements
         title_tag = soup.find('title')
         if title_tag and title_tag.string:
             page_info['Title'] = title_tag.string.strip()
             page_info['Title Length'] = len(page_info['Title'])
+            if 50 <= page_info['Title Length'] <= 60:
+                page_info['Title Status'] = 'Optimal (50-60 chars)'
+            elif page_info['Title Length'] < 50:
+                page_info['Title Status'] = 'Too Short (<50 chars)'
+            else:
+                page_info['Title Status'] = 'Too Long (>60 chars)'
 
         meta_desc = soup.find('meta', attrs={'name': 'description'})
         if meta_desc and meta_desc.get('content'):
             page_info['Meta Description'] = meta_desc['content'].strip()
             page_info['Meta Desc Length'] = len(page_info['Meta Description'])
+            if 150 <= page_info['Meta Desc Length'] <= 160:
+                page_info['Meta Desc Status'] = 'Optimal (150-160 chars)'
+            elif page_info['Meta Desc Length'] < 150:
+                page_info['Meta Desc Status'] = 'Too Short (<150 chars)'
+            else:
+                page_info['Meta Desc Status'] = 'Too Long (>160 chars)'
 
         h1_tags = soup.find_all('h1')
         page_info['H1 Count'] = len(h1_tags)
@@ -154,6 +180,44 @@ class WebsiteAuditor:
                 'Has Alt Text': 'Yes' if has_alt else 'No'
             })
 
+        # Gemini AI Analysis
+        if self.model and text_content:
+            try:
+                # Truncate text content to avoid token limits for very large pages
+                snippet = text_content[:2000]
+                prompt = f"""
+                You are an expert SEO and web auditor. Analyze the following webpage data and provide:
+                1. A comma-separated list of the top 3-5 keywords or phrases this page is targeting.
+                2. A brief, actionable recommendation (1-2 sentences) on how to improve this page based on its metadata and content.
+
+                Page Data:
+                URL: {url}
+                Title: {page_info['Title']}
+                Meta Description: {page_info['Meta Description']}
+                H1 Count: {page_info['H1 Count']}
+                Word Count: {page_info['Word Count']}
+                Images Missing Alt: {page_info['Images Missing Alt']}
+
+                Content Snippet:
+                {snippet}
+
+                Format your response strictly as:
+                Keywords: [keyword1, keyword2, ...]
+                Recommendation: [Your recommendation here]
+                """
+                response = self.model.generate_content(prompt)
+
+                # Parse the response
+                lines = response.text.strip().split('\n')
+                for line in lines:
+                    if line.startswith('Keywords:'):
+                        page_info['Keywords'] = line.replace('Keywords:', '').strip()
+                    elif line.startswith('Recommendation:'):
+                        page_info['AI Recommendations'] = line.replace('Recommendation:', '').strip()
+
+            except Exception as e:
+                logger.error(f"Error calling Gemini API for {url}: {e}")
+
         self.page_audit_data.append(page_info)
 
     def run_audit(self):
@@ -189,10 +253,19 @@ def main():
     parser = argparse.ArgumentParser(description='Audit a website and generate an Excel report.')
     parser.add_argument('url', help='The starting URL of the website to audit')
     parser.add_argument('--max-pages', type=int, default=50, help='Maximum number of pages to audit (default: 50)')
+    parser.add_argument('--gemini-api-key', type=str, default=None, help='Google Gemini API Key for AI-powered keyword extraction and recommendations')
 
     args = parser.parse_args()
 
-    auditor = WebsiteAuditor(args.url, max_pages=args.max_pages)
+    # Prompt for API key if not provided but want the feature
+    api_key = args.gemini_api_key
+    if not api_key:
+        print("\n--- Optional AI Feature ---")
+        use_ai = input("Would you like to use Google Gemini AI for smart keyword extraction and SEO recommendations? (y/N): ").strip().lower()
+        if use_ai == 'y':
+            api_key = input("Please paste your Gemini API Key: ").strip()
+
+    auditor = WebsiteAuditor(args.url, max_pages=args.max_pages, gemini_api_key=api_key)
     auditor.run_audit()
 
 if __name__ == '__main__':
